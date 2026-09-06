@@ -6,7 +6,7 @@ from Config.config import Configuration
 
 df = read_table(spark, table='customers', mysql_config=Configuration.mysql_config)
 """
-from typing import Dict
+from typing import Dict12
 from Config.config import Configuration
 import logging
 
