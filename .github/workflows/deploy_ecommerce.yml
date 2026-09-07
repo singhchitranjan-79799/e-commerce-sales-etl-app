@@ -45,7 +45,7 @@ jobs:
         # Upload Glue code to S3
 
         run: |
-          cd E-commerce-sales-etl-pipeline/SRC
+          cd SRC
 
           zip -r ../glue_code.zip . \
             -x "*/__pycache__/*" "*.pyc"
