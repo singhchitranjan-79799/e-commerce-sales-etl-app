@@ -6,8 +6,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from enterprise_pipeline.config import Configuration, SparkConfig
-from enterprise_pipeline.connection.mysql_connection import read_table
+from config import Configuration, SparkConfig
+from connection.mysql_connection import read_table
 from pyspark.sql import DataFrame
 from pyspark.sql.functions import col, max, lit, to_timestamp
 import logging

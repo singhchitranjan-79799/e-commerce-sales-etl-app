@@ -1,13 +1,13 @@
 """MySQL JDBC helpers for Spark reads.
 
 Usage:
-from enterprise_pipeline.connection.connection1 import read_table
-from enterprise_pipeline.config import Configuration
+from connection.connection1 import read_table
+from config import Configuration
 
 df = read_table(spark, table='customers', mysql_config=Configuration.mysql_config)
 """
 from typing import Dict
-from enterprise_pipeline.config import Configuration
+from config import Configuration
 import logging
 
 logging.basicConfig(level=logging.INFO, format=('%(asctime)s - %(levelname)s - %(message)s'))

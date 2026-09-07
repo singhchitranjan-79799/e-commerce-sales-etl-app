@@ -8,8 +8,8 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
-from enterprise_pipeline.config import Configuration, SparkConfig
-from enterprise_pipeline.connection.connection1 import read_table
+from config import Configuration, SparkConfig
+from connection.connection1 import read_table
 import boto3
 from pyspark.sql.types import *
 from pyspark.sql.functions import (

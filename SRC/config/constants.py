@@ -1,4 +1,4 @@
-from enterprise_pipeline.config.pipeline_config import PipelineConfig
+from config.pipeline_config import PipelineConfig
 
 BRONZE_PREFIX = "bronze_data"
 SILVER_PREFIX = "silver_data"

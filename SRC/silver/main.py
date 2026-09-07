@@ -8,11 +8,11 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
 
-from enterprise_pipeline.silver.customer1 import Customer
-from enterprise_pipeline.silver.product1 import Product
-from enterprise_pipeline.silver.inventory1 import Inventory
-from enterprise_pipeline.silver.order1 import Order
-from enterprise_pipeline.silver.order_item1 import OrderItem
+from silver.customer1 import Customer
+from silver.product1 import Product
+from silver.inventory1 import Inventory
+from silver.order1 import Order
+from silver.order_item1 import OrderItem
 
 logging.basicConfig(
     level=logging.INFO,

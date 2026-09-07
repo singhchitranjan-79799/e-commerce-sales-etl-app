@@ -1,4 +1,4 @@
-from enterprise_pipeline.bronze.bronze_orchestration import bronze_table_jobs
+from bronze.bronze_orchestration import bronze_table_jobs
 
 
 def run_bronze_ingestion():

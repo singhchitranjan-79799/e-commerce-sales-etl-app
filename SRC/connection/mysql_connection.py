@@ -2,7 +2,7 @@
 
 from typing import Dict
 
-from enterprise_pipeline.config import Configuration
+from config import Configuration
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

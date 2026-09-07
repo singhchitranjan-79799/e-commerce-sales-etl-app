@@ -1,5 +1,5 @@
-from enterprise_pipeline.bronze.bronze1 import BronzeExtractor
-from enterprise_pipeline.config import Configuration
+from bronze.bronze1 import BronzeExtractor
+from config import Configuration
 
 
 def bronze_table_jobs():
