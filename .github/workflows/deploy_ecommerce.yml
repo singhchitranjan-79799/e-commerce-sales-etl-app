@@ -53,7 +53,17 @@ jobs:
           aws s3 cp \
             ../glue_code.zip \
             s3://${{ secrets.AWS_GLUE_SCRIPTS_BUCKET }}/e-commerce-code/glue_code/glue_code.zip
-        
+      - name: Upload Bronze Glue script
+        run: |
+          aws s3 cp \
+            SRC/main/bronze_entry.py \
+            s3://${{ secrets.AWS_GLUE_SCRIPTS_BUCKET }}/e-commerce-code/bronze/bronze_entry.py
+
+      - name: Upload Silver Glue script
+        run: |
+          aws s3 cp \
+            SRC/main/silver_entry.py \
+            s3://${{ secrets.AWS_GLUE_SCRIPTS_BUCKET }}/e-commerce-code/silver/silver_entry.py  
 
       - name: Done
         run: echo "Deployment workflow completed"
