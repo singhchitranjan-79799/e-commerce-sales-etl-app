@@ -1,0 +1,64 @@
+## Simple auto-deploy for E-commerce app
+## Requirements:
+## - Secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_GLUE_SCRIPTS_BUCKET, BRONZE_GLUE_JOB_NAME (optional)
+## - Ensure these scripts exist and are executable if present:
+##     ./enterprise_pipeline/github/ci/build_glue_bundle.sh
+##     ./enterprise_pipeline/github/cd/deploy_to_aws.sh
+
+name: Deploy E-commerce to AWS
+
+on:
+  push:
+    branches:
+      - main
+      - e-commerce-sales-etl-app
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Build Glue bundle (if script exists)
+        shell: bash
+        run: |
+          if [ -x ./enterprise_pipeline/github/ci/build_glue_bundle.sh ]; then
+            chmod +x ./enterprise_pipeline/github/ci/build_glue_bundle.sh
+            ./enterprise_pipeline/github/ci/build_glue_bundle.sh
+          else
+            echo "No build script found; skipping build"
+          fi
+
+      - name: Upload bundle to S3 (if present)
+        shell: bash
+        run: |
+          BUNDLE_PATH=./enterprise_pipeline/glue_bundle/dist/ecommerce_etl_glue_bundle.zip
+          if [ -f "$BUNDLE_PATH" ]; then
+            aws s3 cp "$BUNDLE_PATH" s3://${{ secrets.AWS_GLUE_SCRIPTS_BUCKET }}/glue_bundles/ || true
+            echo "Uploaded bundle to s3://${{ secrets.AWS_GLUE_SCRIPTS_BUCKET }}/glue_bundles/"
+          else
+            echo "Bundle not found at $BUNDLE_PATH; skipping upload"
+          fi
+
+      - name: Optionally start Glue job
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.BRONZE_GLUE_JOB_NAME }}" ]; then
+            aws glue start-job-run --job-name "${{ secrets.BRONZE_GLUE_JOB_NAME }}" || true
+            echo "Triggered Glue job ${BRONZE_GLUE_JOB_NAME}"
+          else
+            echo "No BRONZE_GLUE_JOB_NAME secret set; skipping Glue start"
+          fi
+
+      - name: Done
+        run: echo "Deployment workflow completed"
