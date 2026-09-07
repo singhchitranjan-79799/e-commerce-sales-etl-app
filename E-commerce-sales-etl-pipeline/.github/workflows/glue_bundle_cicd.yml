@@ -1,3 +1,13 @@
+## Requirements to run this workflow automatically:
+## - Location: place this file in the repository root under .github/workflows
+## - Trigger: push to branch 'main' (or add branches); manual runs via workflow_dispatch
+## - Path filters: only changes under the listed paths trigger the workflow. Remove the 'paths:' block to run on any push.
+## - Required Secrets (Settings → Secrets): AWS_ROLE_TO_ASSUME, GLUE_DEPLOY_BUCKET, BRONZE_GLUE_JOB_NAME, SILVER_GLUE_JOB_NAME
+## - Repo settings: GitHub Actions must be enabled and branch protection must allow workflows
+## - Build/deploy scripts must exist and be executable:
+##     ./enterprise_pipeline/github/ci/build_glue_bundle.sh
+##     ./enterprise_pipeline/github/cd/deploy_to_aws.sh
+
 name: Glue Bundle CI/CD
 
 on:
