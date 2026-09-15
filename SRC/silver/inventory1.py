@@ -18,7 +18,6 @@ from pyspark.sql.functions import (
     trim,
 )
 import logging
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -210,6 +209,7 @@ class Inventory:
                     .when(col("warehouse_name").isin("Chennai", "Bangalore"), "South")
                     .otherwise("Unknown")
                 )
+                .withColumn("load_date", current_date())
             )
 
             df_inventory_final = df_derived.select(
@@ -228,16 +228,17 @@ class Inventory:
                 col("stock_difference"),
                 col("stock_level"),
                 col("warehouse_region"),
+                col("load_date"),
             )
 
             final_row_count = df_inventory_final.count()
             logger.info(f"Inventory Silver transformation produced {final_row_count} valid rows.")
             df_inventory_final.show(truncate=False)
 
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_inventory_prefix}/{today_date}"
+            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_inventory_prefix}/"
             logger.info(f"Writing Silver inventory data to: {s3_target_path}")
-            df_inventory_final.write.mode("overwrite").parquet(s3_target_path)
+            self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            df_inventory_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver inventory data successfully written to {s3_target_path}")
             return df_inventory_final
         except Exception as e:

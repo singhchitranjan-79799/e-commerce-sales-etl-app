@@ -9,12 +9,11 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
         sys.path.insert(0, str(root))
 
 from config import Configuration, SparkConfig
-from connection.connection1 import read_table
+from connection.mysql_connection import read_table
 import boto3
 from pyspark.sql.types import *
 from pyspark.sql.functions import length, concat, floor, datediff, current_date, lit, when, col
 import logging
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -183,7 +182,8 @@ class Customer:
                     "is_premium_customer",
                     when(col("segment_name") == "Gold", True)
                     .otherwise(False)
-                )
+                )\
+                .withColumn("load_date",current_date())
 
             customer_df_final = df_derived.select(
                 col("email"),
@@ -211,17 +211,19 @@ class Customer:
                 col("age_group"),
                 col("customer_tenure_days"),
                 col("customer_status"),
-                col("is_premium_customer")
+                col("is_premium_customer"),
+                col("load_date")
             )
+
 
             final_row_count = customer_df_final.count()
             logger.info(f"Customer Silver transformation produced {final_row_count} valid rows.")
             customer_df_final.show(truncate=False)
 
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            s3_target_path = f"s3://{Configuration.bucket}/silver_data/customer_data/{today_date}"
+            s3_target_path = f"s3://{Configuration.bucket}/silver_data/customer_data/"
             logger.info(f"Writing Silver customer data to: {s3_target_path}")
-            customer_df_final.write.mode("overwrite").parquet(s3_target_path)
+            self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            customer_df_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver customer data successfully written to {s3_target_path}")
             return customer_df_final
         except Exception as e:

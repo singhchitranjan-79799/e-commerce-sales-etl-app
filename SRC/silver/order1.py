@@ -23,7 +23,6 @@ from pyspark.sql.functions import (
     when,
 )
 import logging
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -229,6 +228,7 @@ class Order:
                     "is_delivered",
                     when(col("status_name") == "Delivered", True).otherwise(False)
                 )
+                .withColumn("load_date", current_date())
             )
 
             order_df_final = df_derived.select(
@@ -249,16 +249,17 @@ class Order:
                 col("order_quarter"),
                 col("order_day"),
                 col("is_delivered"),
+                col("load_date"),
             )
 
             final_row_count = order_df_final.count()
             logger.info(f"Order Silver transformation produced {final_row_count} valid rows.")
             order_df_final.show(truncate=False)
 
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_order_prefix}/{today_date}"
+            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_order_prefix}/"
             logger.info(f"Writing Silver order data to: {s3_target_path}")
-            order_df_final.write.mode("overwrite").parquet(s3_target_path)
+            self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            order_df_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver order data successfully written to {s3_target_path}")
             return order_df_final
         except Exception as e:

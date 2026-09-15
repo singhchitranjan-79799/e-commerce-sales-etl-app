@@ -20,7 +20,6 @@ from pyspark.sql.functions import (
     when,
 )
 import logging
-from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -197,6 +196,7 @@ class Product:
                     .when(col("is_active") == "N", "Inactive")
                     .otherwise("Unknown")
                 )
+                .withColumn("load_date", current_date())
             )
 
             df_product = df_derived.select(
@@ -215,16 +215,17 @@ class Product:
                 col("price_range"),
                 col("product_status"),
                 col("category_name"),
+                col("load_date"),
             )
 
             final_row_count = df_product.count()
             logger.info(f"Product Silver transformation produced {final_row_count} valid rows.")
             df_product.show(truncate=False)
 
-            today_date = datetime.now().strftime("%Y-%m-%d")
-            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_product_prefix}/{today_date}"
+            s3_target_path = f"s3://{Configuration.bucket}/{self.silver_product_prefix}/"
             logger.info(f"Writing Silver product data to: {s3_target_path}")
-            df_product.write.mode("overwrite").parquet(s3_target_path)
+            self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+            df_product.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver product data successfully written to {s3_target_path}")
             return df_product
         except Exception as e:
