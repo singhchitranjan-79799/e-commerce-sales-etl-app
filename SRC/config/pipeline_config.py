@@ -1,29 +1,39 @@
-import os
+import sys
 from datetime import datetime
-from dotenv import load_dotenv
+
+from awsglue.utils import getResolvedOptions
 
 
-def _resolve_project_root() -> str:
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# AWS Glue Job Parameters
+# These values are supplied to the Glue job as:
+# --host, --port, --database, --username, --password, --driver, --s3_bucket
+args = getResolvedOptions(
+    sys.argv,
+    [
+        "host",
+        "port",
+        "database",
+        "username",
+        "password",
+        "driver",
+        "s3_bucket",
+    ],
+)
 
 
 class PipelineConfig:
-    """Project-aware ETL configuration aligned with the working Bronze/Silver logic."""
-
-    project_root = _resolve_project_root()
-    env_path = os.path.join(project_root, "Env_variable", "credentials.env")
-    load_dotenv(env_path)
+    """ETL configuration for AWS Glue runtime."""
 
     mysql_config = {
-        "host": os.getenv("host", "host.docker.internal"),
-        "port": os.getenv("port", "3306"),
-        "database": os.getenv("database", "ecommerce"),
-        "username": os.getenv("username", "root"),
-        "password": os.getenv("password", ""),
-        "driver": os.getenv("driver", "com.mysql.cj.jdbc.Driver"),
+        "host": args["host"],
+        "port": args["port"],
+        "database": args["database"],
+        "username": args["username"],
+        "password": args["password"],
+        "driver": args["driver"],
     }
 
-    bucket = os.getenv("s3_bucket", "e-commerce-sales-etl")
+    bucket = args["s3_bucket"]
     prefix = "ingestion_data"
     base_path = f"s3://{bucket}/{prefix}"
 
