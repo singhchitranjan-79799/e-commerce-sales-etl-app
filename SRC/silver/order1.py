@@ -11,8 +11,10 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
 from config import Configuration, SparkConfig
 from connection.connection1 import read_table
 import boto3
+from pyspark import StorageLevel
 from pyspark.sql.types import *
 from pyspark.sql.functions import (
+    to_date,
     col,
     current_date,
     trim,
@@ -199,7 +201,10 @@ class Order:
             raise
 
     def run_dq_check(self, df, customer_df_final, payment_lookup_df, status_lookup_df):
+        # Returned outputs stay cached until the caller finishes both writes.
+        df_checks = invalid_df = order_df_final = None
         try:
+            df = df.persist(StorageLevel.MEMORY_AND_DISK)
             logger.info("Starting Silver data quality and transformation checks for orders.")
 
             df_checks = df.filter(col("order_id").isNotNull())
@@ -218,6 +223,11 @@ class Order:
             df_checks = df_checks.withColumn("shipping_address", trim(col("shipping_address")))
             df_checks = df_checks.filter(col("last_updated_timestamp").isNotNull())
 
+            df_checks = df_checks.persist(StorageLevel.MEMORY_AND_DISK)
+            # Duplicate primary IDs are rejected above; keep every original rejected row.
+            valid_ids = df_checks.select("order_id").distinct()
+            invalid_df = df.join(valid_ids, on="order_id", how="left_anti").persist(StorageLevel.MEMORY_AND_DISK)
+
             df_derived = (
                 df_checks
                 .withColumn("order_year", year(col("order_date")))
@@ -228,7 +238,7 @@ class Order:
                     "is_delivered",
                     when(col("status_name") == "Delivered", True).otherwise(False)
                 )
-                .withColumn("load_date", current_date())
+                .withColumn("source_update_date", to_date(col("last_updated_timestamp")))
             )
 
             order_df_final = df_derived.select(
@@ -249,22 +259,48 @@ class Order:
                 col("order_quarter"),
                 col("order_day"),
                 col("is_delivered"),
-                col("load_date"),
+                col("source_update_date"),
             )
 
+            order_df_final = order_df_final.persist(StorageLevel.MEMORY_AND_DISK)
             final_row_count = order_df_final.count()
+            # Primary IDs are unique in the accepted source; count IDs to detect join fan-out.
+            input_row_count = df.count()
+            accepted_row_count = valid_ids.count()
+            rejected_row_count = invalid_df.count()
+            logger.info(
+                "order reconciliation: input=%s, accepted_source=%s, rejected=%s, valid_output=%s",
+                input_row_count, accepted_row_count, rejected_row_count, final_row_count,
+            )
+            if input_row_count != accepted_row_count + rejected_row_count:
+                raise ValueError(
+                    f"order reconciliation failed: input={input_row_count}, "
+                    f"accepted={accepted_row_count}, rejected={rejected_row_count}"
+                )
+            if final_row_count != accepted_row_count:
+                raise ValueError(
+                    f"order output count mismatch (possible join multiplication): "
+                    f"accepted_source={accepted_row_count}, valid_output={final_row_count}"
+                )
             logger.info(f"Order Silver transformation produced {final_row_count} valid rows.")
-            order_df_final.show(truncate=False)
 
             s3_target_path = f"s3://{Configuration.bucket}/{self.silver_order_prefix}/"
             logger.info(f"Writing Silver order data to: {s3_target_path}")
             self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-            order_df_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
+            order_df_final.write.partitionBy("source_update_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver order data successfully written to {s3_target_path}")
-            return order_df_final
+            return order_df_final, invalid_df
         except Exception as e:
+            for cached_df in (order_df_final, invalid_df):
+                if cached_df is not None:
+                    cached_df.unpersist()
             logger.error(f"Silver order data quality or write failed: {e}")
             raise
+        finally:
+            if df_checks is not None:
+                df_checks.unpersist()
+            df.unpersist()
+
 
     def run_order_etl(self):
         try:
@@ -282,15 +318,25 @@ class Order:
             status_lookup_df = self.load_status_lookup()
 
             for partition in unprocessed_partition:
+                valid_df = invalid_df = None
                 try:
                     s3_path = f"s3://{Configuration.bucket}/{self.bronze_order_prefix}/{partition}"
                     logger.info(f"Processing bronze partition {partition} from {s3_path}")
                     validated_df = self.schema_validation(s3_path)
-                    self.run_dq_check(validated_df, customer_reference_df, payment_lookup_df, status_lookup_df)
+                    valid_df, invalid_df = self.run_dq_check(validated_df, customer_reference_df, payment_lookup_df, status_lookup_df)
+                    quarantine_path = (
+                        f"s3://{Configuration.bucket}/quarantine_data/order_data/{partition}/"
+                    )
+                    logger.info(f"Writing rejected records to: {quarantine_path}")
+                    invalid_df.write.mode("overwrite").parquet(quarantine_path)
                     logger.info(f"Silver processing completed for partition {partition}")
                 except Exception as e:
                     logger.error(f"Failed to process order bronze partition {partition}: {e}")
                     raise
+                finally:
+                    for cached_df in (valid_df, invalid_df):
+                        if cached_df is not None:
+                            cached_df.unpersist()
 
             logger.info("Order Silver ETL job completed successfully.")
         except Exception as e:

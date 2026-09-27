@@ -11,8 +11,9 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
 from config import Configuration, SparkConfig
 from connection.mysql_connection import read_table
 import boto3
+from pyspark import StorageLevel
 from pyspark.sql.types import *
-from pyspark.sql.functions import length, concat, floor, datediff, current_date, lit, when, col
+from pyspark.sql.functions import to_date, length, concat, floor, datediff, current_date, lit, when, col
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -140,7 +141,10 @@ class Customer:
             raise
 
     def run_dq_check(self, df, customer_segment_df):
+        # Returned outputs stay cached until the caller finishes both writes.
+        df_checks = invalid_df = customer_df_final = None
         try:
+            df = df.persist(StorageLevel.MEMORY_AND_DISK)
             logger.info("Starting Silver data quality and transformation checks for customers.")
             df_checks = df.filter(col("customer_id").isNotNull())
 
@@ -157,6 +161,11 @@ class Customer:
             df_checks = df_checks.join(df_dedup, "email", "inner")
             df_checks = df_checks.filter(col("email").isNotNull())
             df_checks = df_checks.filter(length(col("phone_number")) == 10)
+
+            df_checks = df_checks.persist(StorageLevel.MEMORY_AND_DISK)
+            # Duplicate primary IDs are rejected above; keep every original rejected row.
+            valid_ids = df_checks.select("customer_id").distinct()
+            invalid_df = df.join(valid_ids, on="customer_id", how="left_anti").persist(StorageLevel.MEMORY_AND_DISK)
 
             df_derived = df_checks.withColumn("full_name", concat("first_name", lit(" "), "last_name")) \
                 .withColumn("age", floor(datediff(current_date(), (col("dob"))) / 365.25)) \
@@ -183,7 +192,7 @@ class Customer:
                     when(col("segment_name") == "Gold", True)
                     .otherwise(False)
                 )\
-                .withColumn("load_date",current_date())
+                .withColumn("source_update_date", to_date(col("last_updated_timestamp")))
 
             customer_df_final = df_derived.select(
                 col("email"),
@@ -212,23 +221,49 @@ class Customer:
                 col("customer_tenure_days"),
                 col("customer_status"),
                 col("is_premium_customer"),
-                col("load_date")
+                col("source_update_date")
             )
 
 
+            customer_df_final = customer_df_final.persist(StorageLevel.MEMORY_AND_DISK)
             final_row_count = customer_df_final.count()
+            # Primary IDs are unique in the accepted source; count IDs to detect join fan-out.
+            input_row_count = df.count()
+            accepted_row_count = valid_ids.count()
+            rejected_row_count = invalid_df.count()
+            logger.info(
+                "customer reconciliation: input=%s, accepted_source=%s, rejected=%s, valid_output=%s",
+                input_row_count, accepted_row_count, rejected_row_count, final_row_count,
+            )
+            if input_row_count != accepted_row_count + rejected_row_count:
+                raise ValueError(
+                    f"customer reconciliation failed: input={input_row_count}, "
+                    f"accepted={accepted_row_count}, rejected={rejected_row_count}"
+                )
+            if final_row_count != accepted_row_count:
+                raise ValueError(
+                    f"customer output count mismatch (possible join multiplication): "
+                    f"accepted_source={accepted_row_count}, valid_output={final_row_count}"
+                )
             logger.info(f"Customer Silver transformation produced {final_row_count} valid rows.")
-            customer_df_final.show(truncate=False)
 
             s3_target_path = f"s3://{Configuration.bucket}/silver_data/customer_data/"
             logger.info(f"Writing Silver customer data to: {s3_target_path}")
             self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-            customer_df_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
+            customer_df_final.write.partitionBy("source_update_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver customer data successfully written to {s3_target_path}")
-            return customer_df_final
+            return customer_df_final, invalid_df
         except Exception as e:
+            for cached_df in (customer_df_final, invalid_df):
+                if cached_df is not None:
+                    cached_df.unpersist()
             logger.error(f"Silver customer data quality or write failed: {e}")
             raise
+        finally:
+            if df_checks is not None:
+                df_checks.unpersist()
+            df.unpersist()
+
 
     def load_customer_segment_lookup(self):
         try:
@@ -256,15 +291,25 @@ class Customer:
 
             load_customer_segment_table = self.load_customer_segment_lookup()
             for partition in unprocessed_partition:
+                valid_df = invalid_df = None
                 try:
                     s3_path = f"s3://{Configuration.bucket}/{self.bronze_customer_prefix}/{partition}"
                     logger.info(f"Processing bronze partition {partition} from {s3_path}")
                     schema_validation = self.schema_validation(s3_path)
-                    self.run_dq_check(schema_validation, load_customer_segment_table)
+                    valid_df, invalid_df = self.run_dq_check(schema_validation, load_customer_segment_table)
+                    quarantine_path = (
+                        f"s3://{Configuration.bucket}/quarantine_data/customer_data/{partition}/"
+                    )
+                    logger.info(f"Writing rejected records to: {quarantine_path}")
+                    invalid_df.write.mode("overwrite").parquet(quarantine_path)
                     logger.info(f"Silver processing completed for partition {partition}")
                 except Exception as e:
                     logger.error(f"Failed to process customer bronze partition {partition}: {e}")
                     raise
+                finally:
+                    for cached_df in (valid_df, invalid_df):
+                        if cached_df is not None:
+                            cached_df.unpersist()
 
             logger.info("Customer Silver ETL job completed successfully.")
         except Exception as e:

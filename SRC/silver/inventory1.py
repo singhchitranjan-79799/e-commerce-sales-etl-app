@@ -10,8 +10,10 @@ for root in (PROJECT_ROOT, ENTERPRISE_ROOT):
 
 from config import Configuration, SparkConfig
 import boto3
+from pyspark import StorageLevel
 from pyspark.sql.types import *
 from pyspark.sql.functions import (
+    to_date,
     col,
     current_date,
     when,
@@ -166,7 +168,10 @@ class Inventory:
             raise
 
     def run_dq_check(self, df, df_product):
+        # Returned outputs stay cached until the caller finishes both writes.
+        df_checks = invalid_df = df_inventory_final = None
         try:
+            df = df.persist(StorageLevel.MEMORY_AND_DISK)
             logger.info("Starting Silver data quality and transformation checks for inventory.")
 
             df_checks = df.filter(col("inventory_id").isNotNull())
@@ -183,6 +188,11 @@ class Inventory:
             df_checks = df_checks.filter(col("last_stock_update") <= current_date())
             df_checks = df_checks.filter(col("inventory_status").isin("In Stock", "Low Stock", "Out of Stock"))
             df_checks = df_checks.filter(col("last_updated_timestamp").isNotNull())
+
+            df_checks = df_checks.persist(StorageLevel.MEMORY_AND_DISK)
+            # Duplicate primary IDs are rejected above; keep every original rejected row.
+            valid_ids = df_checks.select("inventory_id").distinct()
+            invalid_df = df.join(valid_ids, on="inventory_id", how="left_anti").persist(StorageLevel.MEMORY_AND_DISK)
 
             df_derived = (
                 df_checks
@@ -209,7 +219,7 @@ class Inventory:
                     .when(col("warehouse_name").isin("Chennai", "Bangalore"), "South")
                     .otherwise("Unknown")
                 )
-                .withColumn("load_date", current_date())
+                .withColumn("source_update_date", to_date(col("last_updated_timestamp")))
             )
 
             df_inventory_final = df_derived.select(
@@ -228,22 +238,48 @@ class Inventory:
                 col("stock_difference"),
                 col("stock_level"),
                 col("warehouse_region"),
-                col("load_date"),
+                col("source_update_date"),
             )
 
+            df_inventory_final = df_inventory_final.persist(StorageLevel.MEMORY_AND_DISK)
             final_row_count = df_inventory_final.count()
+            # Primary IDs are unique in the accepted source; count IDs to detect join fan-out.
+            input_row_count = df.count()
+            accepted_row_count = valid_ids.count()
+            rejected_row_count = invalid_df.count()
+            logger.info(
+                "inventory reconciliation: input=%s, accepted_source=%s, rejected=%s, valid_output=%s",
+                input_row_count, accepted_row_count, rejected_row_count, final_row_count,
+            )
+            if input_row_count != accepted_row_count + rejected_row_count:
+                raise ValueError(
+                    f"inventory reconciliation failed: input={input_row_count}, "
+                    f"accepted={accepted_row_count}, rejected={rejected_row_count}"
+                )
+            if final_row_count != accepted_row_count:
+                raise ValueError(
+                    f"inventory output count mismatch (possible join multiplication): "
+                    f"accepted_source={accepted_row_count}, valid_output={final_row_count}"
+                )
             logger.info(f"Inventory Silver transformation produced {final_row_count} valid rows.")
-            df_inventory_final.show(truncate=False)
 
             s3_target_path = f"s3://{Configuration.bucket}/{self.silver_inventory_prefix}/"
             logger.info(f"Writing Silver inventory data to: {s3_target_path}")
             self.start_spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
-            df_inventory_final.write.partitionBy("load_date").mode("overwrite").parquet(s3_target_path)
+            df_inventory_final.write.partitionBy("source_update_date").mode("overwrite").parquet(s3_target_path)
             logger.info(f"Silver inventory data successfully written to {s3_target_path}")
-            return df_inventory_final
+            return df_inventory_final, invalid_df
         except Exception as e:
+            for cached_df in (df_inventory_final, invalid_df):
+                if cached_df is not None:
+                    cached_df.unpersist()
             logger.error(f"Silver inventory data quality or write failed: {e}")
             raise
+        finally:
+            if df_checks is not None:
+                df_checks.unpersist()
+            df.unpersist()
+
 
     def run_inventory_etl(self):
         try:
@@ -259,15 +295,25 @@ class Inventory:
             product_reference_df = self.load_product_reference()
 
             for partition in unprocessed_partition:
+                valid_df = invalid_df = None
                 try:
                     s3_path = f"s3://{Configuration.bucket}/{self.bronze_inventory_prefix}/{partition}"
                     logger.info(f"Processing bronze partition {partition} from {s3_path}")
                     validated_df = self.schema_validation(s3_path)
-                    self.run_dq_check(validated_df, product_reference_df)
+                    valid_df, invalid_df = self.run_dq_check(validated_df, product_reference_df)
+                    quarantine_path = (
+                        f"s3://{Configuration.bucket}/quarantine_data/inventory_data/{partition}/"
+                    )
+                    logger.info(f"Writing rejected records to: {quarantine_path}")
+                    invalid_df.write.mode("overwrite").parquet(quarantine_path)
                     logger.info(f"Silver processing completed for partition {partition}")
                 except Exception as e:
                     logger.error(f"Failed to process inventory bronze partition {partition}: {e}")
                     raise
+                finally:
+                    for cached_df in (valid_df, invalid_df):
+                        if cached_df is not None:
+                            cached_df.unpersist()
 
             logger.info("Inventory Silver ETL job completed successfully.")
         except Exception as e:
