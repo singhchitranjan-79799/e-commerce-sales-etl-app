@@ -90,7 +90,7 @@ class BronzeExtractor:
         This is the raw source extraction step in bronze architecture.
         """
         logger.info(f"Starting S3 bronze read for table: {table}")
-        return self.start_spark.read.option("multiline", "true").json(s3_path)
+        return self.start_spark.read.json(s3_path)
 
     def read_mysql_raw_data(self, table: str):
         """Read raw table data from MySQL using the existing JDBC helper.
